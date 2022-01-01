@@ -5,10 +5,16 @@ const myDB = require('./connection');
 const fccTesting = require('./freeCodeCamp/fcctesting.js');
 const passport=require("passport");
 const session=require("express-session");
-const ObjectID=require("mongodb").ObjectID;
-const LocalStrategy=require('passport-local');
-
+const routes=require("./routes");
+const auth=require("./auth");
 const app = express();
+const http = require('http').createServer(app);
+const io = require('socket.io')(http);
+const passportSocketIo=require("passport.socketio");
+const MongoStore=require("connect-mongo")(session);
+const cookieParser=require("cookie-parser");
+const URI = process.env.MONGO_URI;
+const store = new MongoStore({ url: URI });
 fccTesting(app); //For FCC testing purposes
 app.set('view engine','pug')
 app.use('/public', express.static(process.cwd() + '/public'));
@@ -22,66 +28,54 @@ app.use(session({
 }));
 app.use(passport.initialize());
 app.use(passport.session());
-function ensureAuthenticated(req, res, next) {
-  if (req.isAuthenticated()) {
-    return next();
-  }
-  res.redirect('/');
-};
 
+io.use(
+  passportSocketIo.authorize({
+    cookieParser: cookieParser,
+    key: 'express.sid',
+    secret: process.env.SESSION_SECRET,
+    store: store,
+    success: onAuthorizeSuccess,
+    fail: onAuthorizeFail
+  })
+);
+function onAuthorizeSuccess(data, accept) {
+  console.log('successful connection to socket.io');
+  
+  accept(null, true);
+}
+
+function onAuthorizeFail(data, message, error, accept) {
+  if (error) throw new Error(message);
+  console.log('failed connection to socket.io:', message);
+  accept(null, false);
+}
 myDB(async (client)=>{
   const myDataBase=await client.db('database').collection('users');
-app.route('/').get((req, res) => {
-  res.render("./pug/index",{title: 'Connected to database', message: 'Please login',showLogin:true,showRegistration:true})
-})
-app.post("/login",passport.authenticate("local",{failureRedirect:"/"}),function(req,res){
-  res.redirect("/profile");
-})
-app.get("/profile",ensureAuthenticated,function(req,res){
-  res.render("./pug/profile",{username:req.user.username});
-})
-app.get("/logout",(req,res)=>{
-  req.logout();
-  res.redirect('/');
-})
-app.use((req,res,next)=>{
-  res.status('404').type("text").send("Not Found");
-})
-app.route("/register").post((req,res,next)=>{
-  myDataBase.findOne({username:req.body.username},(err,user)=>{
-    if(err) {console.log("not hi");next(err);}
-    else if(user) res.redirect("/")
-    else{
-      console.log("hi")
-      myDataBase.insertOne({username:req.body.username,password:req.body.password},(err,doc)=>{
-        if(err) res.redirect("/");
-        else{
-          next(null,doc.ops[0])
-        }
-      })
-    }
+  routes(app,myDataBase);
+  auth(app,myDataBase);
+  let currentUsers=0;
+  io.on('connection', socket => {
+    currentUsers++
+  console.log('A user has connected');
+  io.emit('user', {
+  name: socket.request.user.name,
+  currentUsers,
+  connected: true
+  });
+  socket.on('chat message',(message)=>{
+    io.emit('chat message',{name:socket.request.user.name,message})
   })
-},passport.authenticate("local",{failureRedirect:"/"},(req,res,next)=>{
-  res.redirect("/profile");
-}))
-passport.serializeUser((user,done)=>{
-  done(null,user._id);
+  socket.on('disconnect',()=>{
+    //socket disconnection
+      currentUsers--
+      io.emit('user', {
+  name: socket.request.user.name,
+  currentUsers,
+  connected: false
+  });
+  })
 });
-passport.deserializeUser((id,done)=>{
-  myDataBase.findOne({_id:new ObjectID(id)},(err,doc)=>{
-    done(null,doc);
-  })
-})
-
-passport.use(new LocalStrategy(function(username,password,done){
-myDataBase.findOne({username:username},(err,user)=>{
-  console.log("User "+username+" attempted a login")
-  if(err)return done(null,err);
-  if(!user)return done(null,false);
-  if(password!=user.password)return done(null,false);
-  return done(null,user);
-})
-}))
 
 }).catch((e)=>{
 app.route('/').get((req,res)=>{
@@ -89,13 +83,8 @@ app.route('/').get((req,res)=>{
 })
 })
 
-
-
-
-
-
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+http.listen(PORT, () => {
   console.log('Listening on port ' + PORT);
+  //console.log('user ' + socket.request.user.name + ' connected');
 });
